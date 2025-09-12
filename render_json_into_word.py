@@ -1,0 +1,444 @@
+from docxtpl import DocxTemplate, InlineImage
+from docx.shared import Inches
+from io import BytesIO
+import base64
+import re
+import os
+import json
+
+def process_json_data_for_template(json_data):
+    """
+    Process the nested JSON data structure and extract content with image placeholders
+    """
+    processed_data = {}
+    all_images = {}
+    
+    for main_section, main_content in json_data.items():
+        print(f"Processing main section: {main_section}")
+        
+        if not isinstance(main_content, dict):
+            continue
+        
+        for sub_section, sub_content in main_content.items():
+            print(f"  Processing sub-section: {sub_section}")
+            
+            # Create a unique key for this section
+            section_key = f"{main_section}_{sub_section}".replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "").replace("&", "and").replace('"', "").replace("'", "")
+            
+            # Get content and images
+            if isinstance(sub_content, dict):
+                content = sub_content.get('content', '')
+                images = sub_content.get('images', {})
+            else:
+                content = str(sub_content)
+                images = {}
+            
+            # Store processed content
+            processed_data[section_key] = content
+            
+            # Collect all images with their original keys
+            for img_key, img_data in images.items():
+                all_images[img_key] = img_data
+                print(f"    Found image: {img_key}")
+    
+    return processed_data, all_images
+
+def sanitize_key(key_string):
+    """
+    Sanitize a key string by removing/replacing all problematic characters
+    """
+    safe_key = key_string
+    
+    # Replace specific characters one by one
+    safe_key = safe_key.replace('"', '')
+    safe_key = safe_key.replace("'", '')
+    safe_key = safe_key.replace('&', 'and')
+    safe_key = safe_key.replace(' ', '_')
+    safe_key = safe_key.replace('(', '')
+    safe_key = safe_key.replace(')', '')
+    safe_key = safe_key.replace('/', '___')
+    safe_key = safe_key.replace(';', '_')
+    safe_key = safe_key.replace(':', '')
+    safe_key = safe_key.replace(',', '')
+    safe_key = safe_key.replace('-', '_')
+    
+    # Remove any remaining special characters using regex
+    safe_key = re.sub(r'[^\w_]', '', safe_key)
+    
+    # Clean up multiple underscores
+    safe_key = re.sub(r'_+', '_', safe_key)
+    safe_key = safe_key.strip('_')
+    
+    return safe_key
+
+def create_safe_key_mapping(json_data):
+    """
+    Create safe template keys and a mapping to avoid special character issues
+    """
+    safe_mapping = {}
+    key_to_safe = {}
+    
+    for main_section, main_content in json_data.items():
+        # Create safe main section key
+        safe_main = sanitize_key(main_section)
+        
+        safe_mapping[safe_main] = {}
+        key_to_safe[main_section] = safe_main
+        
+        print(f"  Main section mapping: '{main_section}' → '{safe_main}'")
+        
+        if not isinstance(main_content, dict):
+            continue
+            
+        for sub_section, sub_content in main_content.items():
+            # Create safe sub section key
+            safe_sub = sanitize_key(sub_section)
+            
+            safe_mapping[safe_main][safe_sub] = sub_content
+            key_to_safe[f"{main_section}|{sub_section}"] = f"{safe_main}|{safe_sub}"
+            
+            print(f"    Sub-section mapping: '{sub_section}' → '{safe_sub}'")
+    
+    return safe_mapping, key_to_safe
+
+def render_step1_json_text_conversion_memory(template_path, json_data):
+    """
+    STEP 1: Convert [IMAGE_1] → {{image_1}} and render text with JSON data
+    Returns: BytesIO object containing intermediate document
+    """
+    try:
+        print("  Loading original template...")
+        doc = DocxTemplate(template_path)
+        
+        # Create safe key mapping to avoid special character issues
+        safe_data, key_mapping = create_safe_key_mapping(json_data)
+        
+        # Process content and convert image placeholders
+        for main_key, main_content in safe_data.items():
+            print(f"  Processing main section: {main_key}")
+            
+            if not isinstance(main_content, dict):
+                continue
+            
+            for sub_key, sub_content in main_content.items():
+                print(f"    Processing sub-section: {sub_key}")
+                
+                if isinstance(sub_content, dict):
+                    content = sub_content.get('content', '')
+                    images = sub_content.get('images', {})
+                else:
+                    content = str(sub_content)
+                    images = {}
+                
+                # Convert image placeholders to template variables in the content
+                modified_content = content
+                image_placeholders = re.findall(r'\[IMAGE_\d+\]', content)
+                
+                for placeholder in image_placeholders:
+                    image_key = placeholder[1:-1]  # Remove brackets: IMAGE_1
+                    template_var = f'{{{{ {image_key.lower()} }}}}'  # Convert to: {{ image_1 }}
+                    modified_content = modified_content.replace(placeholder, template_var)
+                    print(f"      Converted: {placeholder} → {template_var}")
+                
+                # Update the content with modified version
+                safe_data[main_key][sub_key] = {
+                    'content': modified_content,
+                    'images': images
+                }
+                
+                if modified_content != content:
+                    print(f"      Modified content: {modified_content[:100]}...")
+        
+        # Prepare context with safe keys
+        context = {'data': safe_data}
+        
+        print(f"  Context prepared with safe main sections: {list(safe_data.keys())}")
+        
+        # Render with text only and save to BytesIO
+        doc.render(context)
+        
+        # Save to memory instead of file
+        intermediate_bytes = BytesIO()
+        doc.save(intermediate_bytes)
+        intermediate_bytes.seek(0)  # Reset pointer to beginning
+        
+        print(f"  ✓ Step 1 completed. Intermediate document: {len(intermediate_bytes.getvalue())} bytes")
+        return intermediate_bytes
+            
+    except Exception as e:
+        print(f"  ✗ Step 1 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def render_step2_with_images_json_memory(intermediate_doc_bytes, images):
+    """
+    STEP 2: Use intermediate document as template and render with actual images
+    Returns: BytesIO object containing final document
+    """
+    try:
+        print("  Loading intermediate template from memory...")
+        
+        # Load the intermediate document from BytesIO
+        intermediate_doc_bytes.seek(0)  # Make sure we're at the beginning
+        doc = DocxTemplate(intermediate_doc_bytes)
+        
+        print(f"  Processing {len(images)} images...")
+        
+        # Process images and create InlineImage objects
+        context = {}
+        
+        for key, base64_data in images.items():
+            try:
+                print(f"    Processing {key}...")
+                
+                # Skip if no image data
+                if not base64_data or str(base64_data).strip() == '':
+                    print(f"    ⚠ {key}: No image data, skipping")
+                    context[key.lower()] = f"[{key} - no data]"
+                    continue
+                
+                # Convert to string if not already
+                base64_data = str(base64_data)
+                
+                # Clean base64 data
+                if ',' in base64_data:
+                    base64_data = base64_data.split(',')[1]
+                
+                # Validate base64 data length
+                if len(base64_data) < 100:
+                    print(f"    ⚠ {key}: Base64 data too short ({len(base64_data)} chars), skipping")
+                    context[key.lower()] = f"[{key} - invalid data]"
+                    continue
+                
+                # Try to decode base64
+                try:
+                    image_data = base64.b64decode(base64_data)
+                except Exception as decode_error:
+                    print(f"    ✗ {key}: Base64 decode failed: {decode_error}")
+                    context[key.lower()] = f"[{key} - decode error]"
+                    continue
+                
+                if len(image_data) < 50:
+                    print(f"    ⚠ {key}: Decoded image too small ({len(image_data)} bytes), skipping")
+                    context[key.lower()] = f"[{key} - invalid image]"
+                    continue
+                    
+                image_stream = BytesIO(image_data)
+                
+                # Create InlineImage object
+                try:
+                    image_obj = InlineImage(
+                        doc, 
+                        image_stream, 
+                        width=Inches(2.5),
+                        height=Inches(1.8)
+                    )
+                    
+                    context[key.lower()] = image_obj
+                    print(f"    ✓ {key} processed successfully")
+                    
+                except Exception as image_error:
+                    print(f"    ✗ Error creating InlineImage for {key}: {image_error}")
+                    context[key.lower()] = f"[{key} - image creation error]"
+                
+            except Exception as e:
+                print(f"    ✗ Error processing {key}: {e}")
+                context[key.lower()] = f"[{key} - error: {str(e)[:50]}]"
+        
+        print(f"  Context prepared with keys: {list(context.keys())}")
+        
+        # Render with images and save to BytesIO
+        doc.render(context)
+        
+        final_bytes = BytesIO()
+        doc.save(final_bytes)
+        final_bytes.seek(0)  # Reset pointer to beginning
+        
+        print(f"  ✓ Step 2 completed. Final document: {len(final_bytes.getvalue())} bytes")
+        
+        if len(final_bytes.getvalue()) > 10000:
+            print(f"  ✓ File size suggests images were successfully embedded")
+        
+        return final_bytes
+            
+    except Exception as e:
+        print(f"  ✗ Step 2 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def two_step_document_creation_json_memory(template_path, json_data):
+    """
+    Two-step rendering process for JSON data - RETURNS BINARY DATA instead of saving
+    Step 1: Process JSON data and render text with image placeholders converted to {{image_1}}, {{image_2}}
+    Step 2: Use Step 1 output as new template and render with actual images
+    Returns: BytesIO object containing the final Word document
+    """
+    
+    try:
+        print("=== TWO-STEP RENDERING PROCESS FOR JSON DATA (MEMORY MODE) ===")
+        print(f"Template: {template_path}")
+        print("Output: BytesIO object (no file saving)")
+        print()
+        
+        # Validate template file
+        if not os.path.exists(template_path):
+            print(f"✗ Template file not found: {template_path}")
+            return None
+        
+        # Process JSON data
+        print("PREPROCESSING: Extracting data from JSON structure...")
+        processed_sections, all_images = process_json_data_for_template(json_data)
+        
+        print(f"Extracted {len(processed_sections)} sections and {len(all_images)} images")
+        print(f"Sections: {list(processed_sections.keys())}")
+        print(f"Images: {list(all_images.keys())}")
+        print()
+        
+        # STEP 1: Convert image placeholders and render text only
+        print("STEP 1: Converting image placeholders to template variables...")
+        intermediate_doc_bytes = render_step1_json_text_conversion_memory(template_path, json_data)
+        
+        if not intermediate_doc_bytes:
+            print("✗ Step 1 failed!")
+            return None
+        
+        # STEP 2: Use intermediate document as template and render with images
+        print("\nSTEP 2: Rendering images into the converted template...")
+        final_doc_bytes = render_step2_with_images_json_memory(intermediate_doc_bytes, all_images)
+        
+        if not final_doc_bytes:
+            print("✗ Step 2 failed!")
+            return None
+        
+        print(f"\n🎉 SUCCESS! Two-step rendering completed!")
+        print(f"Final document: BytesIO object with {len(final_doc_bytes.getvalue())} bytes")
+        
+        return final_doc_bytes
+        
+    except Exception as e:
+        print(f"✗ Two-step rendering failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def generate_document_in_memory(template_file, json_data):
+    """
+    Generate Word document and return as BytesIO object
+    
+    Args:
+        template_file (str): Path to the Word template file
+        json_data (dict): JSON data structure
+    
+    Returns:
+        BytesIO: Document bytes or None if failed
+    """
+    # Validate inputs
+    if not template_file or not os.path.exists(template_file):
+        print(f"✗ Template file not found: {template_file}")
+        return None
+    
+    if not json_data or not isinstance(json_data, dict):
+        print("✗ Invalid JSON data provided")
+        return None
+    
+    # Run the two-step process
+    document_bytes = two_step_document_creation_json_memory(template_file, json_data)
+    
+    if document_bytes:
+        print(f"\nDocument generated in memory successfully!")
+        print(f"Document size: {len(document_bytes.getvalue())} bytes")
+        print("No files saved to disk")
+        print("Document ready for download/streaming")
+        
+        return document_bytes
+    else:
+        print("\nDocument generation failed. Check the error messages above.")
+        return None
+
+def save_bytes_to_file(document_bytes, output_path):
+    """
+    Optional: Save the BytesIO object to a file
+    
+    Args:
+        document_bytes (BytesIO): Document bytes
+        output_path (str): Output file path
+    
+    Returns:
+        bool: Success status
+    """
+    try:
+        if not document_bytes:
+            print("No document bytes to save")
+            return False
+            
+        document_bytes.seek(0)  # Reset to beginning
+        with open(output_path, 'wb') as f:
+            f.write(document_bytes.getvalue())
+        print(f"Document saved to: {output_path}")
+        return True
+    except Exception as e:
+        print(f"Failed to save file: {e}")
+        return False
+
+# Example usage and testing
+if __name__ == "__main__":
+    # Test configuration
+    template_file = "word_template.docx"
+    
+    # Test JSON data structure
+    test_json_data = {
+        "Enterprise Reporting; Data & Analytics Strategy": {
+            "General Notes & \"Wish List\"": {
+                "content": "All business units use Excel for reporting but face challenges integrating financial and operational data. [IMAGE_1] Current reporting processes are manual and time-consuming.",
+                "images": {
+                    "IMAGE_1": "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k="
+                }
+            },
+            "Team Dynamics": {
+                "content": "The analytics team consists of 5 members with varying skill levels in data analysis and reporting tools.",
+                "images": {}
+            }
+        },
+        "Record to Report (R2R)": {
+            "General Ledger Accounting": {
+                "content": "Current GL processes are heavily manual with monthly close taking 15 business days. Key challenges include account reconciliations and intercompany eliminations.",
+                "images": {}
+            }
+        }
+    }
+    
+    print("=== MEMORY-BASED DOCUMENT GENERATION TEST ===")
+    print("Testing Word document generation in memory...")
+    print()
+    
+    # Check if template exists
+    if not os.path.exists(template_file):
+        print(f"Warning: Template file not found: {template_file}")
+        print("Please ensure the template file exists to run the test.")
+    else:
+        # Generate document in memory
+        document_bytes = generate_document_in_memory(template_file, test_json_data)
+        
+        if document_bytes:
+            print("\n=== SUCCESS ===")
+            print("Document generated successfully in memory")
+            print(f"Document size: {len(document_bytes.getvalue())} bytes")
+            print("\nYou can now:")
+            print("1. Return it from a web API endpoint")
+            print("2. Stream it to a client")
+            print("3. Save it to a file if needed:")
+            print("   save_bytes_to_file(document_bytes, 'output.docx')")
+            
+            # Optionally save for testing
+            # save_bytes_to_file(document_bytes, "test_output.docx")
+        else:
+            print("\n=== FAILURE ===")
+            print("Document generation failed")
+    
+    print(f"\n=== BENEFITS FOR AZURE DEPLOYMENT ===")
+    print("- No temporary files created")
+    print("- Memory-based processing suitable for serverless")
+    print("- Better performance and security")
+    print("- Handles multiple concurrent requests")
