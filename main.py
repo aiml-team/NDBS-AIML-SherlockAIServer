@@ -245,9 +245,127 @@ async def health_check():
         }
     }
 
+@app.post("/docx-to-parsed-json")
+async def docx_to_parsed_json(file: UploadFile = File(...)):
+    """
+    Step 1: Convert uploaded DOCX file to parsed JSON structure
+    
+    Input: DOCX file
+    Output: Parsed JSON with structured sections
+    """
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith('.docx'):
+            raise HTTPException(status_code=400, detail="Only .docx files are supported")
+        
+        print(f"Processing uploaded file: {file.filename}")
+        
+        # Create temporary file for uploaded DOCX
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as temp_docx:
+            content = await file.read()
+            temp_docx.write(content)
+            temp_docx_path = temp_docx.name
+        
+        try:
+            # Step 1: Convert DOCX to JSON
+            print("Converting DOCX to JSON...")
+            json_data = convert_docx_to_json_memory(temp_docx_path)
+            
+            if not json_data:
+                raise HTTPException(status_code=500, detail="Failed to convert DOCX to JSON")
+            
+            print(f"JSON data extracted with {len(json_data.get('sequence', []))} items")
+            
+            # Step 2: Parse document sections
+            print("Parsing document sections...")
+            parsed_data = parse_document_sections(sections_list, json_data)
+            
+            if not parsed_data:
+                raise HTTPException(status_code=500, detail="Failed to parse document sections")
+            
+            print(f"Parsed into {len(parsed_data)} main sections")
+            
+            # Return parsed data as JSON
+            return {
+                "status": "success",
+                "message": f"Document parsed successfully into {len(parsed_data)} sections",
+                "parsed_data": parsed_data
+            }
+        
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_docx_path):
+                os.unlink(temp_docx_path)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in docx_to_parsed_json: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+@app.post("/summarize-json")
+async def summarize_json(request_data: dict):
+    """
+    Step 2: Summarize parsed JSON data using AI
+    
+    Input: Parsed JSON structure (from /docx-to-parsed-json)
+    Output: AI-summarized JSON ready for Word document generation
+    """
+    try:
+        print("Received parsed data for summarization...")
+        
+        # Extract parsed_data from request
+        if "parsed_data" in request_data:
+            parsed_data = request_data["parsed_data"]
+            print("Extracted parsed_data from request")
+        else:
+            # Assume the entire request is parsed data
+            parsed_data = request_data
+            print("Using entire request as parsed data")
+        
+        if not parsed_data:
+            raise HTTPException(status_code=400, detail="No parsed data provided")
+        
+        print(f"Received {len(parsed_data)} main sections for summarization")
+        
+        # Initialize AI summarizer
+        print("Initializing AI summarizer...")
+        summarizer = JSONContentSummarizer()
+        
+        # Summarize content
+        print("Summarizing content with AI...")
+        summarized_data = summarizer.summarize_json(parsed_data)
+        
+        if not summarized_data:
+            raise HTTPException(status_code=500, detail="Failed to summarize content")
+        
+        print("Content summarized successfully")
+        
+        # Return summarized data
+        return {
+            "status": "success",
+            "message": "Content summarized successfully",
+            "summarized_data": summarized_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in summarize_json: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error summarizing JSON: {str(e)}")
+
 @app.post("/process-docx-upload")
 async def process_docx_upload(file: UploadFile = File(...)):
-    """Process uploaded DOCX file and return summarized JSON"""
+    """
+    LEGACY ENDPOINT - Combines all steps in one
+    Process uploaded DOCX file and return AI-summarized JSON
+    
+    For better control, use the split endpoints:
+    1. /docx-to-parsed-json (DOCX → Parsed JSON)
+    2. /summarize-json (Parsed JSON → AI Summary)
+    """
     try:
         # Validate file type
         if not file.filename.lower().endswith('.docx'):
@@ -292,7 +410,7 @@ async def process_docx_upload(file: UploadFile = File(...)):
             
             print("Content summarized successfully")
             
-            # ✅ Return summarized data as JSON (instead of generating Word doc)
+            # Return summarized data as JSON (instead of generating Word doc)
             return {"summarized_data": summarized_data}
         
         finally:
@@ -362,12 +480,19 @@ async def get_status():
         "current_directory": str(current_dir),
         "files_in_directory": [f for f in os.listdir(current_dir) if f.endswith('.py') or f.endswith('.docx')],
         "workflow": {
-            "step_1": "Upload DOCX → Get AI-summarized JSON",
-            "step_2": "Send JSON → Get Word document"
+            "step_1": "Upload DOCX → Get Parsed JSON",
+            "step_2": "Send Parsed JSON → Get AI-Summarized JSON",
+            "step_3": "Send AI-Summarized JSON → Get Word Document"
         },
         "endpoints": {
-            "docx_to_json": "/process-docx-upload - Upload DOCX file, returns AI-summarized JSON",
-            "json_to_word": "/process-json - Send JSON data, returns Word document"
+            "docx_to_parsed_json": "/docx-to-parsed-json - Upload DOCX file, returns structured parsed JSON",
+            "summarize_json": "/summarize-json - Send parsed JSON, returns AI-summarized JSON",
+            "json_to_word": "/process-json - Send AI-summarized JSON, returns Word document",
+            "legacy_all_in_one": "/process-docx-upload - [LEGACY] Upload DOCX, returns AI-summarized JSON (combines steps 1+2)"
+        },
+        "features": {
+            "unique_image_ids": "Images use SHA256-based unique identifiers (IMAGE_<hash>)",
+            "duplicate_detection": "Duplicate images are automatically detected and reused"
         }
     }
 
@@ -377,4 +502,4 @@ if __name__ == "__main__":
     print(f"Current directory: {current_dir}")
     print(f"Template file: {config.TEMPLATE_FILE}")
     print(f"Template exists: {os.path.exists(config.TEMPLATE_FILE)}")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=5050)

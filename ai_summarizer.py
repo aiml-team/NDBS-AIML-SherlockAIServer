@@ -38,60 +38,64 @@ class JSONContentSummarizer:
         
         print("Environment variables loaded successfully!")
         
-        # Initialize LangChain Azure ChatOpenAI
+        # Initialize LangChain Azure ChatOpenAI with higher token limit
         self.llm = AzureChatOpenAI(
             deployment_name=deployment,
             api_version=api_version,
             temperature=0.3,
-            max_tokens=1000
+            max_tokens=4000
         )
         
-        # Create prompt template for summarization
+        # Create prompt template for analysis
         self.prompt_template = PromptTemplate(
-            input_variables=["content_text"],
-            template="""You are a professional business analyst. Summarize the following content in clear, professional English.
+            input_variables=["all_content"],
+            template="""You are a professional SAP business analyst. Analyze the following content and provide detailed answers to these four questions:
+
+1. Current Processes (Key Findings)
+2. Pain Points
+3. Proposed SAP Solution(s) Mapping
+4. Major Gap(s) & Integration(s)
 
 CRITICAL REQUIREMENTS:
-1. Maintain ALL image references (like [IMAGE_1], [IMAGE_2], etc.) in their EXACT original positions
-2. Provide a concise but comprehensive professional summary
-3. Preserve all key business information and technical details
-4. Use proper business terminology and professional language
-5. Do NOT add any extra words, explanations, or commentary beyond the summarized content
-6. Return ONLY the summarized text, nothing else
+1. Maintain ALL image references (like [IMAGE_A3F2B1C4D5E6F7G8], [IMAGE_9876543210FEDCBA], etc.) in their EXACT original positions within the relevant sections
+2. DO NOT change image reference IDs - preserve the exact alphanumeric hash codes (e.g., IMAGE_A3F2B1C4D5E6F7G8)
+3. These are unique identifiers - do NOT simplify them to IMAGE_1, IMAGE_2, etc.
+4. Write in plain text format WITHOUT markdown formatting - do not use **, -, bullets, or any markdown symbols
+5. Do NOT use escape characters like \n - write naturally flowing text with proper spacing
+6. Keep image references on the same line as surrounding text - do NOT put them on separate lines
+7. Provide comprehensive professional analysis for each question
+8. Use proper business terminology and SAP-specific language where applicable
+9. DO NOT generate new image references that don't exist in the original content
+10. Structure your response EXACTLY as follows:
 
-Content to summarize:
-{content_text}
+Current Processes (Key Findings):
+[Your detailed analysis here in plain text with relevant image references from original content only - preserve exact IDs like [IMAGE_A3F2B1C4D5E6F7G8] inline with text]
 
-Summarized content:"""
+Pain Points:
+[Your detailed analysis here in plain text with relevant image references from original content only - preserve exact IDs inline with text]
+
+Proposed SAP Solution(s) Mapping:
+[Your detailed SAP solution recommendations here in plain text - DO NOT add image references here]
+
+Major Gap(s) & Integration(s):
+[Your detailed gap and integration analysis here in plain text - DO NOT add image references here]
+
+Content to analyze:
+{all_content}
+
+Analysis:"""
         )
         
         # Create the chain using modern LangChain syntax
         self.summarization_chain = self.prompt_template | self.llm
     
     def extract_image_references(self, text: str) -> List[str]:
-        """Extract all image references from text"""
-        return re.findall(r'\[IMAGE_\d+\]', text)
-    
-    def ensure_image_references_preserved(self, original_text: str, summarized_text: str) -> str:
-        """Ensure ONLY the image references from original text are present in summarized text"""
-        original_images = self.extract_image_references(original_text)
-        
-        # Remove any existing image references from summarized text first
-        cleaned_summarized = re.sub(r'\[IMAGE_\d+\]', '', summarized_text).strip()
-        
-        # Add back only the images that were in the original text
-        if original_images:
-            # Find the best position to insert image references
-            result_text = cleaned_summarized
-            for image_ref in original_images:
-                result_text = result_text.rstrip() + f" {image_ref}"
-            return result_text
-        else:
-            return cleaned_summarized
+        """Extract all image references from text (supports hash-based IDs)"""
+        return re.findall(r'\[IMAGE_[A-Z0-9]+\]', text)
     
     def normalize_text(self, text: str) -> str:
-        """Normalize Unicode characters to ASCII equivalents"""
-        # Replace curly quotes with straight quotes
+        """Normalize Unicode characters to ASCII equivalents and clean formatting"""
+        # Replace Unicode quotes
         text = text.replace('\u201c', '"')
         text = text.replace('\u201d', '"')
         text = text.replace('\u2018', "'")
@@ -102,88 +106,209 @@ Summarized content:"""
         
         return text
     
-    def summarize_content(self, content_text: str) -> str:
-        """Summarize a single content text while preserving image references"""
+    def collect_content_for_section(self, section_data: Any, section_path: str = "") -> tuple[str, Dict[str, str]]:
+        """Recursively collect all content fields within a section and their associated images"""
+        all_content = []
+        all_images = {}
+        
+        if isinstance(section_data, dict):
+            for key, value in section_data.items():
+                current_path = f"{section_path}.{key}" if section_path else key
+                
+                if key == 'content' and isinstance(value, str):
+                    normalized_content = self.normalize_text(value)
+                    all_content.append(normalized_content)
+                
+                elif key == 'images' and isinstance(value, dict):
+                    # Collect all images
+                    all_images.update(value)
+                
+                elif isinstance(value, (dict, list)):
+                    content, images = self.collect_content_for_section(value, current_path)
+                    if content:
+                        all_content.append(content)
+                    all_images.update(images)
+        
+        elif isinstance(section_data, list):
+            for i, item in enumerate(section_data):
+                content, images = self.collect_content_for_section(item, f"{section_path}[{i}]")
+                if content:
+                    all_content.append(content)
+                all_images.update(images)
+        
+        return ' '.join(all_content), all_images
+    
+    def parse_llm_response(self, response_text: str) -> Dict[str, str]:
+        """Parse the LLM response into structured sections"""
+        sections = {
+            'Current Processes (Key Findings)': '',
+            'Pain Points': '',
+            'Proposed SAP Solution(s) Mapping': '',
+            'Major Gap(s) & Integration(s)': ''
+        }
+        
+        # Normalize the response
+        response_text = self.normalize_text(response_text)
+        
+        # Split response by section headers
+        current_section = None
+        lines = response_text.split('\n')
+        
+        for line in lines:
+            line_stripped = line.strip()
+            
+            # Check if line is a section header
+            if 'Current Processes' in line_stripped and ':' in line_stripped:
+                current_section = 'Current Processes (Key Findings)'
+            elif 'Pain Points' in line_stripped and ':' in line_stripped:
+                current_section = 'Pain Points'
+            elif 'Proposed SAP Solution' in line_stripped and ':' in line_stripped:
+                current_section = 'Proposed SAP Solution(s) Mapping'
+            elif 'Major Gap' in line_stripped and ':' in line_stripped:
+                current_section = 'Major Gap(s) & Integration(s)'
+            elif current_section:
+                # Add content to current section
+                if line.strip():
+                    sections[current_section] += line + '\n'
+        
+        # Clean up sections
+        for key in sections:
+            sections[key] = sections[key].strip()
+        
+        return sections
+    
+    def clean_ai_content(self, content: str) -> str:
+        """Clean AI-generated content from markdown and escape sequences"""
+        if not content:
+            return content
+            
+        # Replace literal \n with space (AI sometimes adds these)
+        content = content.replace('\\n', ' ')
+        
+        # Remove markdown bold
+        content = content.replace('**', '')
+        
+        # Remove markdown emphasis
+        content = content.replace('__', '')
+        
+        # Clean up bullet points at start of lines
+        import re
+        content = re.sub(r'(?m)^\s*-\s+', '', content)
+        
+        # Clean up multiple spaces but preserve single spaces
+        content = re.sub(r' {2,}', ' ', content)
+        
+        return content.strip()
+    
+    def extract_images_from_section(self, section_text: str, available_images: Dict[str, str]) -> tuple[str, Dict[str, str]]:
+        """Extract image references from section text and return cleaned text with images dict
+        Only include images that actually exist in the original data"""
+        
+        # Clean the AI-generated content first
+        cleaned_text = self.clean_ai_content(section_text)
+        
+        image_refs = self.extract_image_references(cleaned_text)
+        images_dict = {}
+        
+        for img_ref in image_refs:
+            img_key = img_ref.strip('[]')
+            
+            # Only add image if it exists in the original collected images
+            if img_key in available_images:
+                images_dict[img_key] = available_images[img_key]
+            else:
+                # Remove the non-existent image reference from the text
+                cleaned_text = cleaned_text.replace(img_ref, '').strip()
+        
+        return cleaned_text, images_dict
+    
+    def analyze_section(self, section_name: str, section_data: Any) -> Dict[str, Any]:
+        """Analyze a single top-level section and return structured output"""
+        print(f"\nAnalyzing section: {section_name}")
+        print("-" * 80)
+        
+        # Collect all content and images from this section
+        all_content, all_images = self.collect_content_for_section(section_data, section_name)
+        
+        if not all_content.strip():
+            print(f"No content found in section: {section_name}")
+            return None
+        
+        print(f"Collected {len(all_content)} characters of content")
+        print(f"Collected {len(all_images)} images")
+        
+        # Send to LLM for analysis
+        print("Sending content to LLM for analysis...")
         try:
-            print(f"Processing content: {content_text[:100]}...")
-            
-            # Normalize Unicode characters first
-            normalized_text = self.normalize_text(content_text)
-            
-            # Check what image references are in the original
-            original_images = self.extract_image_references(normalized_text)
-            print(f"Found images in original: {original_images}")
-            
-            # Run the summarization chain
-            result = self.summarization_chain.invoke({"content_text": normalized_text})
+            result = self.summarization_chain.invoke({"all_content": all_content})
             
             # Extract content from the AI message
             if hasattr(result, 'content'):
-                summarized_text = result.content
+                analysis_text = result.content
             else:
-                summarized_text = str(result)
+                analysis_text = str(result)
             
-            print(f"AI summarized to: {summarized_text[:100]}...")
-            
-            # Ensure ONLY original image references are preserved
-            summarized = self.ensure_image_references_preserved(normalized_text, summarized_text)
-            
-            # Normalize the output as well
-            summarized = self.normalize_text(summarized)
-            
-            final_images = self.extract_image_references(summarized)
-            print(f"Final images in output: {final_images}")
-            print(f"Final summarized content: {summarized[:150]}...")
-            print("-" * 80)
-            
-            return summarized
+            print("Analysis completed!")
             
         except Exception as e:
-            print(f"Error summarizing content: {e}")
-            return self.normalize_text(content_text)
-    
-    def process_json_recursively(self, data: Any, path: str = "") -> Any:
-        """Recursively process JSON structure to find and summarize content"""
-        if isinstance(data, dict):
-            processed_dict = {}
-            for key, value in data.items():
-                current_path = f"{path}.{key}" if path else key
-                
-                if key == 'content' and isinstance(value, str):
-                    print(f"Found content field at: {current_path}")
-                    # This is a content field - summarize it
-                    processed_dict[key] = self.summarize_content(value)
-                elif isinstance(value, str):
-                    # Normalize other string values but don't summarize
-                    processed_dict[self.normalize_text(key)] = self.normalize_text(value)
-                else:
-                    # Recursively process other fields
-                    processed_key = self.normalize_text(key) if isinstance(key, str) else key
-                    processed_dict[processed_key] = self.process_json_recursively(value, current_path)
-            return processed_dict
+            print(f"Error during LLM analysis: {e}")
+            return None
         
-        elif isinstance(data, list):
-            return [self.process_json_recursively(item, f"{path}[{i}]") for i, item in enumerate(data)]
+        # Parse LLM response into structured sections
+        parsed_sections = self.parse_llm_response(analysis_text)
         
-        elif isinstance(data, str):
-            return self.normalize_text(data)
+        # Structure output for this section
+        section_output = {}
         
-        else:
-            return data
+        # Add each of the 4 analysis sections with content and images
+        for analysis_section_name, analysis_content in parsed_sections.items():
+            section_text, section_images = self.extract_images_from_section(analysis_content, all_images)
+            
+            section_output[analysis_section_name] = {
+                "content": section_text,
+                "images": section_images
+            }
+        
+        return section_output
     
     def summarize_json(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Main method to summarize JSON content"""
-        print("Starting JSON summarization process...")
+        """Main method to analyze JSON content and structure output
+        Returns data in format compatible with Word document generator
+        """
+        print("Starting JSON analysis process...")
         print("=" * 80)
         
-        result = self.process_json_recursively(input_data)
+        # Initialize output structure - DIRECT format for Word generator
+        output = {}
         
+        # Process each top-level section independently
+        for section_name, section_data in input_data.items():
+            print(f"\n{'='*80}")
+            print(f"Processing top-level section: {section_name}")
+            print(f"{'='*80}")
+            
+            section_result = self.analyze_section(section_name, section_data)
+            
+            if section_result:
+                output[section_name] = section_result
+            else:
+                print(f"Skipping section {section_name} - no content to analyze")
+        
+        print("\n" + "=" * 80)
+        print("JSON analysis completed!")
         print("=" * 80)
-        print("JSON summarization completed!")
-        return result
+        return output
 
 def process_json_file(file_path: str, output_path: str = None):
-    """Process JSON from file"""
+    """Process JSON from file and return data ready for Word document generator
+    
+    Args:
+        file_path: Path to input JSON file
+        output_path: Path to save output JSON (optional)
+    
+    Returns:
+        Dictionary in format compatible with Word document generator
+    """
     
     try:
         summarizer = JSONContentSummarizer()
@@ -196,18 +321,23 @@ def process_json_file(file_path: str, output_path: str = None):
         with open(file_path, 'r', encoding='utf-8') as f:
             input_data = json.load(f)
         
-        # Process the JSON
+        # Process the JSON - returns data ready for Word generator
         summarized_data = summarizer.summarize_json(input_data)
+        
+        if summarized_data is None:
+            print("Analysis failed!")
+            return None
         
         # Determine output path
         if output_path is None:
-            output_path = file_path.replace('.json', '_summarized.json')
+            output_path = file_path.replace('.json', '_analyzed.json')
         
-        # Save summarized JSON
+        # Save analyzed JSON
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(summarized_data, f, indent=2, ensure_ascii=False)
         
-        print(f"Summarized JSON saved to: {output_path}")
+        print(f"\nAnalyzed JSON saved to: {output_path}")
+        print(f"Output format: Compatible with Word document generator")
         return summarized_data
         
     except Exception as e:
@@ -215,12 +345,18 @@ def process_json_file(file_path: str, output_path: str = None):
         return None
 
 if __name__ == "__main__":
-    # Example usage
+    # Example usage with the provided input format
     test_data = {
-        'Record to Report (R2R)': {
+        'Idea to Market': {
+            'Product Design & Engineering': {
+                'content': "Today they use Genesis today for recipe development. 95% are formulas are provided by the customer.",
+                'images': {}
+            }
+        },
+        'Source to Pay (S2P)': {
             'General Notes & "Wish List"': {
-                'content': 'What are your key goals/objectives from a finance standpoint for this organization? Primary mission is growth – expansion in US and Canada Reduce claims, reduce costs Speeding up close – currently takes about a month Lots of manual checklists across various users [IMAGE_1] Pull reports from system rather than excel processing',
-                'images': {'IMAGE_1': '/9j//2Q=='}
+                'content': 'Procure to Pay Wednesday, November 19, 2025 10:59 AM Some raw materials are customer specific',
+                'images': {}
             }
         }
     }
@@ -228,6 +364,15 @@ if __name__ == "__main__":
     try:
         summarizer = JSONContentSummarizer()
         result = summarizer.summarize_json(test_data)
-        print(json.dumps(result, indent=2))
+        if result:
+            print("\n" + "=" * 80)
+            print("OUTPUT STRUCTURE (READY FOR WORD GENERATOR):")
+            print("=" * 80)
+            print(json.dumps(result, indent=2))
+            print("\n" + "=" * 80)
+            print("USAGE WITH WORD GENERATOR:")
+            print("=" * 80)
+            print("from word_generator import generate_document_in_memory")
+            print("document_bytes = generate_document_in_memory('template.docx', result)")
     except Exception as e:
         print(f"Error: {e}")

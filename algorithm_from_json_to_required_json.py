@@ -1,3 +1,22 @@
+import hashlib
+
+def generate_unique_image_id(image_content):
+    """
+    Generate a unique, stable identifier for an image based on its content.
+    Uses SHA256 hash of the image content (first 16 characters for readability).
+    """
+    if isinstance(image_content, str):
+        # If it's base64 string, use it directly
+        content_bytes = image_content.encode('utf-8')
+    else:
+        # If it's bytes, use as is
+        content_bytes = image_content
+    
+    # Generate SHA256 hash and take first 16 characters
+    hash_obj = hashlib.sha256(content_bytes)
+    unique_id = hash_obj.hexdigest()[:16].upper()
+    return f"IMAGE_{unique_id}"
+
 def parse_document_sections(sections_list, json_data):
     """
     Parse document sections into nested dictionary structure:
@@ -8,6 +27,8 @@ def parse_document_sections(sections_list, json_data):
             ...
         }
     }
+    
+    Images are identified by unique hash-based IDs instead of simple counters.
     """
     
     # Define main section headers
@@ -44,9 +65,11 @@ def parse_document_sections(sections_list, json_data):
     main_sections_set = set(main_sections)
     
     dic = {}
-    img_count = 1
     current_main_section = None
     current_subsection = None
+    
+    # Track seen images to avoid duplicates
+    seen_images = {}
     
     print(f"Processing {len(json_data['sequence'])} sequence items...")
     
@@ -111,11 +134,20 @@ def parse_document_sections(sections_list, json_data):
                 if current_subsection not in dic[current_main_section]:
                     dic[current_main_section][current_subsection] = {"content": "", "images": {}}
                 
-                key = f"IMAGE_{img_count}"
-                dic[current_main_section][current_subsection]["content"] += f"[{key}] "
-                dic[current_main_section][current_subsection]["images"][key] = seq_content_str
-                img_count += 1
-                print(f"Added image {key} to {current_main_section} -> {current_subsection}")
+                # Generate unique ID based on image content
+                unique_key = generate_unique_image_id(seq_content_str)
+                
+                # Check if we've seen this exact image before
+                if unique_key in seen_images:
+                    print(f"Duplicate image detected: {unique_key}, reusing existing reference")
+                else:
+                    # Mark this image as seen
+                    seen_images[unique_key] = seq_content_str
+                
+                # Add image reference to content
+                dic[current_main_section][current_subsection]["content"] += f"[{unique_key}] "
+                dic[current_main_section][current_subsection]["images"][unique_key] = seq_content_str
+                print(f"Added image {unique_key} to {current_main_section} -> {current_subsection}")
         else:
             print(f"Warning: Found content '{seq_content_str[:30]}...' without main section")
     
@@ -138,6 +170,17 @@ def parse_document_sections(sections_list, json_data):
     print(f"Processed {len(cleaned_dic)} main sections with content")
     for main_section, subsections in cleaned_dic.items():
         print(f"  {main_section}: {len(subsections)} subsections")
+
+    # For debuggin 
+    print("#" * 50)   # Starting horizontal line
+    for _ in range(10):
+        print()
+
+    print(cleaned_dic)
+
+    for _ in range(10):
+        print()
+    print("#" * 50)   # Ending horizontal line
     
     return cleaned_dic
 

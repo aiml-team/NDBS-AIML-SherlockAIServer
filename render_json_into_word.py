@@ -132,13 +132,27 @@ def render_step1_json_text_conversion_memory(template_path, json_data):
                 
                 # Convert image placeholders to template variables in the content
                 modified_content = content
-                image_placeholders = re.findall(r'\[IMAGE_\d+\]', content)
+                # Updated regex to match IMAGE_XXXXX (alphanumeric hash and underscore) format
+                # Also handle potential spacing issues
+                image_placeholders = re.findall(r'\[\s*IMAGE_[A-Z0-9]+\s*\]', content)
+                
+                print(f"      Original content preview: {content[:200]}")
+                print(f"      Content type: {type(content)}, length: {len(content)}")
+                print(f"      Found {len(image_placeholders)} image placeholders: {image_placeholders}")
+                
+                if not image_placeholders:
+                    # Try alternative patterns
+                    alt_matches = re.findall(r'IMAGE_[A-Z0-9]+', content)
+                    if alt_matches:
+                        print(f"      WARNING: Found image refs without brackets: {alt_matches}")
                 
                 for placeholder in image_placeholders:
-                    image_key = placeholder[1:-1]  # Remove brackets: IMAGE_1
-                    template_var = f'{{{{ {image_key.lower()} }}}}'  # Convert to: {{ image_1 }}
+                    image_key = placeholder.strip().strip('[]').strip()  # Remove brackets and whitespace
+                    template_var = f'{{{{ {image_key.lower()} }}}}'  # Convert to: {{ image_a3f2b1c4d5e6f7g8 }}
                     modified_content = modified_content.replace(placeholder, template_var)
-                    print(f"      Converted: {placeholder} → {template_var}")
+                    print(f"      Converted: '{placeholder}' → '{template_var}'")
+                
+                print(f"      Modified content preview: {modified_content[:200]}")
                 
                 # Update the content with modified version
                 safe_data[main_key][sub_key] = {
