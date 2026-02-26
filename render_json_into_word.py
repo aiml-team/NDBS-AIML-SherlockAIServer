@@ -163,6 +163,60 @@ def render_step1_json_text_conversion_memory(template_path, json_data):
                 if modified_content != content:
                     print(f"      Modified content: {modified_content[:100]}...")
         
+        # Pre-populate ALL sections and sub-sections the template references.
+        # If a key is missing from safe_data, Jinja2 raises UndefinedError on the
+        # intermediate dot-access BEFORE | default('') can catch it.
+        # Providing empty dicts for every possible key prevents this entirely.
+        EMPTY_SUB = {
+            "Current_Processes_Key_Findings":  {"content": "", "images": {}},
+            "Pain_Points":                     {"content": "", "images": {}},
+            "Proposed_SAP_Solutions_Mapping":  {"content": "", "images": {}},
+            "Major_Gaps_and_Integrations":     {"content": "", "images": {}},
+        }
+        GENERAL_BUSINESS_OVERVIEW_SUBS = {
+            "Areas_of_Perceived_Competitive_Advantage": {"content": "", "images": {}},
+            "Business_Locations":                       {"content": "", "images": {}},
+            "Contacts_Identified":                      {"content": "", "images": {}},
+            "Fiscal_Year_Format":                       {"content": "", "images": {}},
+            "Industry_Categorization":                  {"content": "", "images": {}},
+            "Key_Public_Cloud_Disqualifiers":            {"content": "", "images": {}},
+            "Key_Value_Drivers":                        {"content": "", "images": {}},
+            "Legal_Entities_and_Names":                 {"content": "", "images": {}},
+            "Motivations_for_Transformation":           {"content": "", "images": {}},
+            "Perceived_Change_Resistance":              {"content": "", "images": {}},
+            "Regulatory_Compliance_Requirements":       {"content": "", "images": {}},
+            "Revenue_Band":                             {"content": "", "images": {}},
+            "Schedule_of_Events":                       {"content": "", "images": {}},
+            "System_Landscape":                         {"content": "", "images": {}},
+            "Technical_Challenges_and_Requirements":    {"content": "", "images": {}},
+            "Total_SAP_Users":                          {"content": "", "images": {}},
+            "Transformation_Program_C_Suite_KPIs":      {"content": "", "images": {}},
+        }
+        ALL_TEMPLATE_SECTIONS = {
+            "General_Business_Overview":                              GENERAL_BUSINESS_OVERVIEW_SUBS,
+            "Idea_to_Market":                                         EMPTY_SUB,
+            "Source_to_Pay_S2P":                                      EMPTY_SUB,
+            "Plan_to_Produce_P2P":                                    EMPTY_SUB,
+            "Detect_to_Correct_D2C":                                  EMPTY_SUB,
+            "Forecast_to_Fulfill_F2F":                                EMPTY_SUB,
+            "Warehouse_Execution_WM_EWM":                             EMPTY_SUB,
+            "Lead_to_Cash_L2C":                                       EMPTY_SUB,
+            "Logistics_Planning_and_Transportation_TM":               EMPTY_SUB,
+            "Request_to_Service_R2S":                                 EMPTY_SUB,
+            "Record_to_Report_R2R":                                   EMPTY_SUB,
+            "Acquire_to_Dispose_A2D":                                 EMPTY_SUB,
+            "Environmental_Social_and_Governance_ESG_Processes":      EMPTY_SUB,
+            "Hire_to_Retire_H2R":                                     EMPTY_SUB,
+            "Enterprise_Reporting_Data_and_Analytics_Strategy":       EMPTY_SUB,
+        }
+        for section_key, default_subs in ALL_TEMPLATE_SECTIONS.items():
+            if section_key not in safe_data:
+                safe_data[section_key] = {}
+            # Fill in any missing sub-keys within each section
+            for sub_key, default_val in default_subs.items():
+                if sub_key not in safe_data[section_key]:
+                    safe_data[section_key][sub_key] = default_val
+
         # Prepare context with safe keys
         context = {'data': safe_data}
         
