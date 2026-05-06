@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+~$*
+venv/
+sherlock_venv/
+*.log
+.git.old-backup/
+
+
+
+

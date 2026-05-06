@@ -1,0 +1,49 @@
+# Web API
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+gunicorn==22.0.0
+python-dotenv==1.1.1
+python-multipart==0.0.20
+requests==2.32.5
+orjson==3.11.3
+
+# Document processing
+python-docx==1.2.0
+docxtpl==0.20.1
+docxcompose==1.4.0
+lxml==6.0.1
+openpyxl==3.1.2
+
+# Azure (only if you actually use Azure auth/blob in code)
+azure-core==1.34.0
+azure-identity==1.23.0
+azure-storage-blob==12.19.0
+
+# LangChain stack
+langchain==0.3.27
+langchain-core==0.3.75
+langchain-community==0.3.24
+langchain-text-splitters==0.3.10
+langchain-openai==0.3.32
+langchain-groq==0.3.2
+langchain-tavily==0.2.11
+langgraph==0.6.6
+langgraph-checkpoint==2.1.1
+langgraph-prebuilt==0.6.4
+langgraph-sdk==0.2.6
+
+# Must be <0.4 for langchain-community 0.3.24
+langsmith>=0.3.45,<0.4
+
+# OpenAI SDK
+openai==1.102.0
+tiktoken==0.11.0
+
+# Compatibility pin (streamlit needs <25; keeping <25 avoids future conflicts)
+packaging>=23.2,<25
+
+# Optional: if you use DuckDuckGo / SerpAPI
+duckduckgo_search==8.0.2
+google_search_results==2.4.2
+serpapi==0.1.5
+tavily-python==0.7.10
