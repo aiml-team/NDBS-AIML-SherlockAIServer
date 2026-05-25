@@ -1,10 +1,159 @@
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Inches
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from copy import deepcopy
 from io import BytesIO
 import base64
 import re
 import os
 import json
+
+
+# ── Internet Research formatting ─────────────────────────────────────────────
+# The Tavily enrichment block (sherlock Web App/tavily_search.py) embeds plain
+# text like:
+#     [Internet Research]
+#     • <fact bullet>
+#     • Source: <title> — <url>
+# into a field's content. docxtpl renders that as a single paragraph with soft
+# line breaks, so we post-process the rendered DOCX to:
+#   • restyle the "[Internet Research]" header line as italic + red
+#   • restyle each "• Source:" line as 8 pt + grey
+_HEADER_TEXT = "[Internet Research]"
+_RED_HEX = "C00000"   # MS Office "Dark Red"
+_GREY_HEX = "808080"  # 50% grey
+_SOURCE_SZ_HALF_POINTS = "16"  # 16 half-points = 8 pt
+
+
+def _classify_line(text):
+    s = (text or "").strip()
+    if s == _HEADER_TEXT:
+        return "header"
+    if s.startswith("• Source:") or s.startswith("Source:"):
+        return "source"
+    return "normal"
+
+
+def _iter_all_paragraphs(doc):
+    """Yield every w:p paragraph in the document, including those inside
+    (possibly nested) tables."""
+    for p in doc.paragraphs:
+        yield p
+    for table in doc.tables:
+        yield from _iter_table_paragraphs(table)
+
+
+def _iter_table_paragraphs(table):
+    for row in table.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                yield p
+            for nested in cell.tables:
+                yield from _iter_table_paragraphs(nested)
+
+
+def _collect_lines(p_el):
+    """Return [(text, base_rPr_or_None), ...] for the paragraph, splitting on
+    <w:br/> elements wherever they appear. base_rPr is the first non-empty
+    run-properties element seen for that line — we deepcopy it when rebuilding
+    so the original run styling (font, bold, etc.) is preserved for normal
+    lines."""
+    lines = []
+    cur_text = ""
+    cur_rpr = None
+    for r in p_el.findall(qn("w:r")):
+        r_rpr = r.find(qn("w:rPr"))
+        for child in list(r):
+            tag = child.tag
+            if tag == qn("w:t"):
+                if cur_rpr is None and r_rpr is not None:
+                    cur_rpr = r_rpr
+                cur_text += (child.text or "")
+            elif tag == qn("w:br"):
+                lines.append((cur_text, cur_rpr))
+                cur_text = ""
+                cur_rpr = None
+            elif tag == qn("w:tab"):
+                cur_text += "\t"
+    lines.append((cur_text, cur_rpr))
+    return lines
+
+
+def _apply_header_style(rpr):
+    for tag in ("w:i", "w:iCs", "w:color"):
+        for el in rpr.findall(qn(tag)):
+            rpr.remove(el)
+    rpr.append(OxmlElement("w:i"))
+    rpr.append(OxmlElement("w:iCs"))
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), _RED_HEX)
+    rpr.append(color)
+
+
+def _apply_source_style(rpr):
+    for tag in ("w:color", "w:sz", "w:szCs"):
+        for el in rpr.findall(qn(tag)):
+            rpr.remove(el)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), _GREY_HEX)
+    rpr.append(color)
+    sz = OxmlElement("w:sz")
+    sz.set(qn("w:val"), _SOURCE_SZ_HALF_POINTS)
+    rpr.append(sz)
+    szCs = OxmlElement("w:szCs")
+    szCs.set(qn("w:val"), _SOURCE_SZ_HALF_POINTS)
+    rpr.append(szCs)
+
+
+def _restyle_paragraph(p):
+    p_el = p._element
+    lines = _collect_lines(p_el)
+    if not any(_classify_line(t) != "normal" for t, _ in lines):
+        return
+
+    # Remove existing top-level run elements; keep w:pPr and anything else.
+    for r in list(p_el.findall(qn("w:r"))):
+        p_el.remove(r)
+
+    pPr = p_el.find(qn("w:pPr"))
+    insert_idx = list(p_el).index(pPr) + 1 if pPr is not None else 0
+
+    new_elems = []
+    for i, (text, base_rpr) in enumerate(lines):
+        if i > 0:
+            br_run = OxmlElement("w:r")
+            if base_rpr is not None:
+                br_run.append(deepcopy(base_rpr))
+            br_run.append(OxmlElement("w:br"))
+            new_elems.append(br_run)
+        if not text:
+            continue
+        cls = _classify_line(text)
+        new_r = OxmlElement("w:r")
+        rpr = deepcopy(base_rpr) if base_rpr is not None else OxmlElement("w:rPr")
+        if cls == "header":
+            _apply_header_style(rpr)
+        elif cls == "source":
+            _apply_source_style(rpr)
+        if list(rpr):
+            new_r.append(rpr)
+        t = OxmlElement("w:t")
+        t.text = text
+        t.set(qn("xml:space"), "preserve")
+        new_r.append(t)
+        new_elems.append(new_r)
+
+    for el in new_elems:
+        p_el.insert(insert_idx, el)
+        insert_idx += 1
+
+
+def _restyle_internet_research(doc):
+    """Walk the document and restyle any [Internet Research] header / Source
+    bullet lines that ended up inside a docxtpl-rendered paragraph."""
+    for p in _iter_all_paragraphs(doc):
+        _restyle_paragraph(p)
 
 def process_json_data_for_template(json_data):
     """
@@ -336,7 +485,14 @@ def render_step2_with_images_json_memory(intermediate_doc_bytes, images):
         
         # Render with images and save to BytesIO
         doc.render(context)
-        
+
+        # Post-process: restyle [Internet Research] header (italic + red) and
+        # • Source: bullet lines (8 pt + grey) inserted by Tavily enrichment.
+        try:
+            _restyle_internet_research(doc.docx)
+        except Exception as restyle_err:
+            print(f"  ⚠ Internet Research restyle skipped: {restyle_err}")
+
         final_bytes = BytesIO()
         doc.save(final_bytes)
         final_bytes.seek(0)  # Reset pointer to beginning
