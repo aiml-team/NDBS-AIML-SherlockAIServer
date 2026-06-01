@@ -8,6 +8,11 @@ sherlock_venv/
 *.log
 .git.old-backup/
 
+# Local test scripts and pipeline-generated artifacts
+_test_*.py
+test_*_output.docx
+output_*.docx
+
 
 
 
